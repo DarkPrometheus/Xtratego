@@ -1,0 +1,1103 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<title>Stratego x XCOM — Prototipo</title>
+<style>
+  :root{
+    --bg: #171a16;
+    --grid-line: #2c3327;
+    --grid-fill: #1d211a;
+    --panel-bg: #14170f;
+    --panel-border: #2c3327;
+    --text-dim: #7c8a6f;
+    --text: #d7ddc9;
+    --p1: #3f7fbf;      /* jugador (azul) */
+    --p1-dark: #274d73;
+    --p2: #b5433f;      /* enemigo (rojo) */
+    --p2-dark: #6e2a27;
+    --mine: #8a7a3a;
+  }
+  * { box-sizing: border-box; }
+  html,body{
+    margin:0; min-height:100%; background:var(--bg);
+    font-family: "Courier New", ui-monospace, monospace;
+    display:flex; flex-direction:column; align-items:center; justify-content:center;
+    gap:16px; padding:24px; color:var(--text);
+  }
+  h1{
+    font-size:14px; letter-spacing:1px; color:var(--text-dim);
+    margin:0; font-weight:normal;
+  }
+  .layout{
+    display:flex; gap:20px; align-items:flex-start;
+  }
+  canvas{
+    background:var(--grid-fill);
+    border:1px solid var(--grid-line);
+  }
+  #legend{
+    width:220px;
+    background:var(--panel-bg);
+    border:1px solid var(--panel-border);
+    padding:14px;
+    font-size:12px;
+    line-height:1.6;
+  }
+  #legend h2{
+    font-size:12px; margin:0 0 8px 0; color:var(--text-dim); font-weight:normal;
+  }
+  .row{ display:flex; align-items:center; gap:8px; margin-bottom:4px; }
+  .swatch{
+    width:14px; height:14px; flex:none;
+    display:flex; align-items:center; justify-content:center;
+    font-size:9px; border-radius:2px;
+  }
+  .icon-canvas{ flex:none; }
+  #controls{ display:flex; gap:10px; }
+  button{
+    background:var(--panel-bg); color:var(--text);
+    border:1px solid var(--panel-border);
+    font-family:inherit; font-size:12px;
+    padding:8px 14px; cursor:pointer;
+  }
+  button:hover{ border-color:var(--text-dim); }
+  #status{
+    font-size:13px; color:var(--text-dim);
+    min-height:18px;
+  }
+  #log{
+    width:900px; max-height:110px; overflow-y:auto;
+    background:var(--panel-bg); border:1px solid var(--panel-border);
+    font-size:12px; padding:8px 12px;
+  }
+  #log div{ margin-bottom:3px; }
+  #log .win{ color:#8fbf6f; }
+  #log .lose{ color:#c77f7f; }
+
+  #arena-overlay{
+    position:fixed; inset:0;
+    background:rgba(6,8,5,0.92);
+    display:flex; align-items:center; justify-content:center;
+    z-index:10;
+  }
+  #arena-overlay.hidden{ display:none; }
+  #arena-panel{
+    background:var(--panel-bg); border:1px solid var(--panel-border);
+    padding:20px; text-align:center;
+  }
+  #arena-header{
+    display:flex; align-items:center; justify-content:space-between;
+    margin-bottom:10px; font-size:12px; color:var(--text-dim);
+  }
+  #arena-canvas{
+    background:#0e120c; border:1px solid var(--panel-border);
+    cursor:pointer;
+  }
+  #arena-log{
+    width:480px; max-height:80px; overflow-y:auto;
+    text-align:left; font-size:11px; margin-top:10px;
+    color:var(--text-dim);
+  }
+  #arena-log div{ margin-bottom:2px; }
+  #arena-log .win{ color:#8fbf6f; }
+  #arena-log .lose{ color:#c77f7f; }
+</style>
+</head>
+<body>
+
+<h1>DESPLIEGUE INICIAL — 30 FICHAS POR BANDO</h1>
+
+<div class="layout">
+  <canvas id="map" width="900" height="900"></canvas>
+  <div id="legend"></div>
+</div>
+
+<div id="controls">
+  <button id="reshuffle">Redistribuir aleatoriamente</button>
+</div>
+
+<div id="status"></div>
+<div id="log"></div>
+
+<div id="arena-overlay" class="hidden">
+  <div id="arena-panel">
+    <div id="arena-header">
+      <span id="arena-phase-label"></span>
+      <button id="arena-end-turn">Terminar turno</button>
+    </div>
+    <canvas id="arena-canvas" width="480" height="340"></canvas>
+    <div id="arena-log"></div>
+  </div>
+</div>
+
+<script>
+const COLS = 10, ROWS = 10;
+const CELL = 900 / COLS;
+
+const canvas = document.getElementById('map');
+const ctx = canvas.getContext('2d');
+const legendEl = document.getElementById('legend');
+
+function getCss(varName){
+  return getComputedStyle(document.documentElement).getPropertyValue(varName).trim();
+}
+
+// --- Definición de tipos de unidad (30 por jugador) ---
+const UNIT_TYPES = [
+  { id:'flag',      label:'Bandera',        abbr:'B', count:1,  atk:0, def:0, special:'No combate. Perderla = derrota.' },
+  { id:'commander', label:'Comandante',     abbr:'C', count:1,  atk:6, def:4, special:'Rango más alto.' },
+  { id:'tank',      label:'Blindado',       abbr:'T', count:3,  atk:8, def:6, special:'Débil contra Zapador.' },
+  { id:'sapper',    label:'Zapador',        abbr:'Z', count:3,  atk:3, def:3, special:'Bonus fuerte contra Blindado.' },
+  { id:'infantry',  label:'Infantería',     abbr:'I', count:10, atk:4, def:4, special:'Unidad base.' },
+  { id:'scout',     label:'Reconocimiento', abbr:'R', count:6,  atk:2, def:2, special:'Alta movilidad/visión.' },
+  { id:'mine',      label:'Mina',           abbr:'M', count:4,  atk:0, def:8, special:'Estática, no se mueve.' },
+  { id:'spy',       label:'Espía',          abbr:'E', count:2,  atk:1, def:1, special:'Elimina al Comandante si lo ataca.' },
+];
+
+function buildRoster(){
+  const roster = [];
+  for(const type of UNIT_TYPES){
+    for(let i = 0; i < type.count; i++){
+      roster.push(type);
+    }
+  }
+  return roster; // 30 fichas
+}
+
+function shuffle(arr){
+  for(let i = arr.length - 1; i > 0; i--){
+    const j = Math.floor(Math.random() * (i + 1));
+    [arr[i], arr[j]] = [arr[j], arr[i]];
+  }
+  return arr;
+}
+
+// Zonas de despliegue: filas 0-2 para el enemigo, filas 7-9 para el jugador,
+// filas 3-6 quedan como zona neutral vacía (como los "lagos" de Stratego).
+function deployZoneCells(rowStart, rowEnd){
+  const cells = [];
+  for(let r = rowStart; r <= rowEnd; r++){
+    for(let c = 0; c < COLS; c++){
+      cells.push({ r, c });
+    }
+  }
+  return shuffle(cells);
+}
+
+let board = []; // board[r][c] = { owner: 1|2, type } | null
+let currentPlayer = 1;
+let selected = null; // { r, c } | null
+
+const statusEl = document.getElementById('status');
+const logEl = document.getElementById('log');
+
+function logMessage(text, cls){
+  const div = document.createElement('div');
+  if(cls) div.className = cls;
+  div.textContent = text;
+  logEl.appendChild(div);
+  logEl.scrollTop = logEl.scrollHeight;
+}
+
+function updateStatus(){
+  statusEl.textContent = `Turno: ${currentPlayer === 1 ? 'Jugador (azul)' : 'Enemigo (rojo)'}`;
+}
+
+// Las minas y la bandera no se mueven (como en Stratego).
+function isMovable(type){
+  return type.id !== 'mine' && type.id !== 'flag';
+}
+
+// --- Movimiento ---
+// Unidades normales: 1 casilla ortogonal (arriba/abajo/izquierda/derecha).
+// Reconocimiento: cualquier número de casillas en línea recta, sin saltar piezas.
+function getValidPath(from, to){
+  const dr = to.r - from.r, dc = to.c - from.c;
+  if(dr === 0 && dc === 0) return null;
+  // Solo se permite línea recta: ortogonal (dr=0 o dc=0) o diagonal pura (|dr| === |dc|).
+  if(dr !== 0 && dc !== 0 && Math.abs(dr) !== Math.abs(dc)) return null;
+
+  const piece = board[from.r][from.c];
+  const stepR = Math.sign(dr), stepC = Math.sign(dc);
+  const distance = Math.max(Math.abs(dr), Math.abs(dc));
+  const maxRange = piece.type.id === 'scout' ? Infinity : 1;
+  if(distance > maxRange) return null;
+
+  // revisa que las celdas intermedias estén vacías (no se puede saltar piezas)
+  let r = from.r + stepR, c = from.c + stepC;
+  while(r !== to.r || c !== to.c){
+    if(board[r][c] !== null) return null;
+    r += stepR; c += stepC;
+  }
+  return true;
+}
+
+function isValidMove(from, to){
+  const piece = board[from.r][from.c];
+  if(!piece || piece.owner !== currentPlayer) return false;
+  if(!isMovable(piece.type)) return false;
+
+  const target = board[to.r][to.c];
+  if(target && target.owner === currentPlayer) return false; // no atacas tus propias fichas
+
+  return !!getValidPath(from, to);
+}
+
+// --- Combate (resuelto al azar para el prototipo; sin arena todavía) ---
+function probabilisticResolve(atkPower, defPower){
+  const a = Math.max(atkPower, 0.5);
+  const d = Math.max(defPower, 0.5);
+  const pAttackerWins = a / (a + d);
+  return Math.random() < pAttackerWins;
+}
+
+// Fuera de la arena solo se resuelven bandera y mina (no forman escuadrón).
+function resolveCombat(attacker, defender){
+  if(defender.type.id === 'flag'){
+    return { attackerWins: true, note: '¡Bandera capturada! Fin de la partida.' };
+  }
+  if(defender.type.id === 'mine'){
+    if(attacker.type.id === 'sapper'){
+      return { attackerWins: true, note: 'El Zapador desactiva la mina.' };
+    }
+    return { attackerWins: false, note: 'La mina destruye al atacante.' };
+  }
+  return null; // cualquier otro caso se resuelve en la arena
+}
+
+const arenaOverlay = document.getElementById('arena-overlay');
+const arenaCanvas = document.getElementById('arena-canvas');
+const arenaCtx = arenaCanvas.getContext('2d');
+const arenaLogEl = document.getElementById('arena-log');
+const arenaPhaseLabelEl = document.getElementById('arena-phase-label');
+
+// Vida y tamaño de escuadrón por tipo (Bandera y Mina no entran a la arena).
+const SQUAD_CONFIG = {
+  commander: { count: 3, hp: 6 },
+  tank:      { count: 1, hp: 18 },
+  sapper:    { count: 2, hp: 5 },
+  infantry:  { count: 4, hp: 6 },
+  scout:     { count: 2, hp: 3 },
+  spy:       { count: 1, hp: 2 },
+};
+
+const A_COLS = 6, A_ROWS = 5;
+const T_W = 80, T_H = 40;
+const A_ORIGIN_X = 220, A_ORIGIN_Y = 60;
+const MOVE_RANGE = 3, ATTACK_RANGE = 3;
+
+// El Espía dispara de más cerca que el resto, a cambio de más daño (ver attemptAttack).
+function getAttackRange(type){
+  if(type.id === 'spy') return 1;
+  return ATTACK_RANGE;
+}
+
+function tileToScreen(col, row){
+  return {
+    x: A_ORIGIN_X + (col - row) * (T_W / 2),
+    y: A_ORIGIN_Y + (col + row) * (T_H / 2),
+  };
+}
+
+function screenToTile(x, y){
+  const dx = x - A_ORIGIN_X, dy = y - A_ORIGIN_Y;
+  const col = Math.round(((dx / (T_W/2)) + (dy / (T_H/2))) / 2);
+  const row = Math.round(((dy / (T_H/2)) - (dx / (T_W/2))) / 2);
+  return { col, row };
+}
+
+let arena = null; // { attackerSquad, defenderSquad, cover:Set, phase, selectedId, pendingReturn }
+
+function key(col, row){ return col + ',' + row; }
+
+function buildSquad(side, unitType, startCol){
+  const cfg = SQUAD_CONFIG[unitType.id];
+  const rows = [];
+  const mid = (A_ROWS - 1) / 2;
+  for(let i = 0; i < cfg.count; i++){
+    rows.push(Math.round(mid + (i - (cfg.count - 1) / 2)));
+  }
+  return rows.map((row, i) => ({
+    id: `${side}-${i}`,
+    side,
+    type: unitType,
+    hp: cfg.hp,
+    maxHp: cfg.hp,
+    col: startCol,
+    row: Math.max(0, Math.min(A_ROWS - 1, row)),
+    acted: false,
+    alive: true,
+  }));
+}
+
+function occupantAt(col, row){
+  const all = [...arena.attackerSquad, ...arena.defenderSquad];
+  return all.find(u => u.alive && u.col === col && u.row === row) || null;
+}
+
+function startArena(from, to, boardAttacker, boardDefender){
+  const cover = new Set();
+  while(cover.size < 5){
+    const c = 2 + Math.floor(Math.random() * 2); // columnas centrales
+    const r = Math.floor(Math.random() * A_ROWS);
+    cover.add(key(c, r));
+  }
+
+  arena = {
+    from, to,
+    boardAttacker, boardDefender,
+    attackerSquad: buildSquad('attacker', boardAttacker.type, 0),
+    defenderSquad: buildSquad('defender', boardDefender.type, A_COLS - 1),
+    cover,
+    phase: 'attacker',
+    selectedId: null,
+  };
+
+  arenaLogEl.innerHTML = '';
+  arenaLog(`Contacto: ${ownerLabel(boardAttacker.owner)} ${boardAttacker.type.label} vs ${ownerLabel(boardDefender.owner)} ${boardDefender.type.label}.`);
+  updateArenaPhaseLabel();
+  arenaOverlay.classList.remove('hidden');
+  drawArena();
+  maybeTriggerArenaAI();
+}
+
+function arenaLog(text, cls){
+  const div = document.createElement('div');
+  if(cls) div.className = cls;
+  div.textContent = text;
+  arenaLogEl.appendChild(div);
+  arenaLogEl.scrollTop = arenaLogEl.scrollHeight;
+}
+
+function updateArenaPhaseLabel(){
+  const label = arena.phase === 'attacker'
+    ? `Turno del ATACANTE (${ownerLabel(arena.boardAttacker.owner)})`
+    : `Turno del DEFENSOR (${ownerLabel(arena.boardDefender.owner)})`;
+  arenaPhaseLabelEl.textContent = label;
+}
+
+function activeSquad(){ return arena.phase === 'attacker' ? arena.attackerSquad : arena.defenderSquad; }
+function otherSquad(){ return arena.phase === 'attacker' ? arena.defenderSquad : arena.attackerSquad; }
+function currentArenaPhaseOwner(){
+  return arena.phase === 'attacker' ? arena.boardAttacker.owner : arena.boardDefender.owner;
+}
+
+function isInCover(unit){
+  const deltas = [[1,0],[-1,0],[0,1],[0,-1]];
+  return deltas.some(([dc,dr]) => arena.cover.has(key(unit.col+dc, unit.row+dr)));
+}
+
+function chebyshev(a,b){ return Math.max(Math.abs(a.col-b.col), Math.abs(a.row-b.row)); }
+
+// Traza la línea de celdas entre dos puntos (algoritmo de Bresenham),
+// para saber qué casillas intermedias atraviesa un disparo.
+function lineCells(x0, y0, x1, y1){
+  const points = [];
+  let dx = Math.abs(x1 - x0), dy = Math.abs(y1 - y0);
+  let sx = x0 < x1 ? 1 : -1, sy = y0 < y1 ? 1 : -1;
+  let err = dx - dy;
+  let x = x0, y = y0;
+  while(true){
+    points.push({ col: x, row: y });
+    if(x === x1 && y === y1) break;
+    const e2 = 2 * err;
+    if(e2 > -dy){ err -= dy; x += sx; }
+    if(e2 < dx){ err += dx; y += sy; }
+  }
+  return points;
+}
+
+// No se puede disparar a través de una casilla de cobertura (bloquea la línea de tiro).
+function hasLineOfSight(a, b){
+  const cells = lineCells(a.col, a.row, b.col, b.row);
+  for(let i = 1; i < cells.length - 1; i++){
+    if(arena.cover.has(key(cells[i].col, cells[i].row))) return false;
+  }
+  return true;
+}
+
+function attemptMove(unit, col, row){
+  if(col < 0 || col >= A_COLS || row < 0 || row >= A_ROWS) return false;
+  if(arena.cover.has(key(col,row))) return false;
+  if(occupantAt(col,row)) return false;
+  if(chebyshev(unit, {col,row}) > MOVE_RANGE) return false;
+  unit.col = col; unit.row = row; unit.acted = true;
+  arenaLog(`${unitLabel(unit)} se reposiciona.`);
+  return true;
+}
+
+function unitLabel(unit){
+  return `${ownerLabel(unit.side === 'attacker' ? arena.boardAttacker.owner : arena.boardDefender.owner)} ${unit.type.label}`;
+}
+
+function attemptAttack(unit, target){
+  if(chebyshev(unit, target) > getAttackRange(unit.type)) return false;
+  if(!hasLineOfSight(unit, target)) return false;
+  unit.acted = true;
+
+  let hitChance = 0.5 + (unit.type.atk - target.type.def) * 0.05;
+  if(unit.type.id === 'sapper' && target.type.id === 'tank') hitChance += 0.3; // bonus de Zapador vs Blindado
+  if(isInCover(target)) hitChance -= 0.25;
+  hitChance = Math.max(0.1, Math.min(0.9, hitChance));
+
+  let hit = Math.random() < hitChance;
+  // El Blindado siempre logra algo de daño contra Infantería (comportamiento normal contra otros Blindados).
+  if(unit.type.id === 'tank' && target.type.id === 'infantry') hit = true;
+
+  if(hit){
+    let dmg = 2 + Math.floor(Math.random() * 4); // 2-5
+    if(unit.type.id === 'spy') dmg += 3; // menos alcance, pero más daño por impacto
+    target.hp -= dmg;
+    if(target.hp <= 0){
+      target.hp = 0;
+      target.alive = false;
+      arenaLog(`${unitLabel(unit)} elimina a ${unitLabel(target)}.`, 'win');
+    } else {
+      arenaLog(`${unitLabel(unit)} impacta a ${unitLabel(target)} (${dmg} de daño, ${Math.round(hitChance*100)}% prob).`);
+    }
+  } else {
+    arenaLog(`${unitLabel(unit)} falla contra ${unitLabel(target)} (${Math.round(hitChance*100)}% prob).`);
+  }
+  return true;
+}
+
+function checkArenaEnd(){
+  const attackerAlive = arena.attackerSquad.some(u => u.alive);
+  const defenderAlive = arena.defenderSquad.some(u => u.alive);
+  if(defenderAlive && attackerAlive) return false;
+
+  const attackerWon = defenderAlive === false;
+  endArena(attackerWon);
+  return true;
+}
+
+function endArena(attackerWon){
+  const { from, to, boardAttacker, boardDefender } = arena;
+  const attackerName = `${ownerLabel(boardAttacker.owner)} ${boardAttacker.type.label}`;
+  const defenderName = `${ownerLabel(boardDefender.owner)} ${boardDefender.type.label}`;
+
+  if(attackerWon){
+    board[to.r][to.c] = boardAttacker;
+    board[from.r][from.c] = null;
+    logMessage(`${attackerName} aniquila al escuadrón de ${defenderName} en la arena.`, 'win');
+  } else {
+    board[from.r][from.c] = null;
+    logMessage(`${defenderName} aniquila al escuadrón de ${attackerName} en la arena.`, 'lose');
+  }
+
+  arena = null;
+  arenaOverlay.classList.add('hidden');
+  currentPlayer = currentPlayer === 1 ? 2 : 1;
+  updateStatus();
+  draw();
+  maybeTriggerAI();
+}
+
+function endArenaPhase(){
+  // El bando que termina su turno queda marcado como "ya actuó",
+  // aunque algunas unidades no se hayan movido/disparado — su turno ya pasó.
+  activeSquad().forEach(u => u.acted = true);
+  arena.phase = arena.phase === 'attacker' ? 'defender' : 'attacker';
+  arena.selectedId = null;
+  activeSquad().forEach(u => u.acted = false);
+  updateArenaPhaseLabel();
+  drawArena();
+  maybeTriggerArenaAI();
+}
+
+// --- IA de la arena (nivel 1: dispara si puede, si no se acerca al enemigo más cercano) ---
+function maybeTriggerArenaAI(){
+  if(arena && currentArenaPhaseOwner() === AI_PLAYER){
+    setTimeout(aiPlayArenaTurn, 500);
+  }
+}
+
+function aiPlayArenaTurn(){
+  if(!arena || currentArenaPhaseOwner() !== AI_PLAYER) return;
+
+  const squad = activeSquad();
+  const pending = squad.filter(u => u.alive && !u.acted);
+  if(pending.length === 0){
+    endArenaPhase();
+    return;
+  }
+
+  const unit = pending[0];
+  const enemySquad = otherSquad();
+  const targets = enemySquad.filter(t => t.alive && chebyshev(unit, t) <= getAttackRange(unit.type) && hasLineOfSight(unit, t));
+
+  if(targets.length > 0){
+    const target = targets[Math.floor(Math.random() * targets.length)];
+    attemptAttack(unit, target);
+    drawArena();
+    if(checkArenaEnd()) return; // la batalla terminó; endArena ya limpió todo
+    setTimeout(aiPlayArenaTurn, 500);
+    return;
+  }
+
+  // Sin objetivos en rango: intenta acercarse al enemigo vivo más cercano.
+  const aliveEnemies = enemySquad.filter(t => t.alive);
+  let moved = false;
+  if(aliveEnemies.length > 0){
+    const closest = aliveEnemies[0];
+    const candidates = [];
+    for(let dc = -MOVE_RANGE; dc <= MOVE_RANGE; dc++){
+      for(let dr = -MOVE_RANGE; dr <= MOVE_RANGE; dr++){
+        if(dc === 0 && dr === 0) continue;
+        const col = unit.col + dc, row = unit.row + dr;
+        if(col < 0 || col >= A_COLS || row < 0 || row >= A_ROWS) continue;
+        if(chebyshev(unit, { col, row }) > MOVE_RANGE) continue;
+        if(arena.cover.has(key(col, row))) continue;
+        if(occupantAt(col, row)) continue;
+        const dist = Math.max(Math.abs(col - closest.col), Math.abs(row - closest.row));
+        candidates.push({ col, row, dist });
+      }
+    }
+    if(candidates.length > 0){
+      candidates.sort((a, b) => a.dist - b.dist);
+      moved = attemptMove(unit, candidates[0].col, candidates[0].row);
+    }
+  }
+  if(!moved) unit.acted = true; // no puede hacer nada, pasa
+
+  drawArena();
+  setTimeout(aiPlayArenaTurn, 400);
+}
+
+document.getElementById('arena-end-turn').addEventListener('click', () => {
+  if(arena && currentArenaPhaseOwner() === AI_PLAYER) return; // no es turno del humano
+  endArenaPhase();
+});
+
+arenaCanvas.addEventListener('click', (evt) => {
+  if(!arena) return;
+  if(currentArenaPhaseOwner() === AI_PLAYER) return; // no es turno del humano
+  const rect = arenaCanvas.getBoundingClientRect();
+  const x = (evt.clientX - rect.left) * (arenaCanvas.width / rect.width);
+  const y = (evt.clientY - rect.top) * (arenaCanvas.height / rect.height);
+  const { col, row } = screenToTile(x, y);
+  if(col < 0 || col >= A_COLS || row < 0 || row >= A_ROWS) return;
+
+  const clicked = occupantAt(col, row);
+  const selected = arena.selectedId
+    ? activeSquad().find(u => u.id === arena.selectedId) || otherSquad().find(u => u.id === arena.selectedId)
+    : null;
+
+  if(!selected){
+    if(clicked && clicked.side === arena.phase && !clicked.acted){
+      arena.selectedId = clicked.id;
+      drawArena();
+    }
+    return;
+  }
+
+  if(clicked && clicked.id === selected.id){
+    arena.selectedId = null;
+    drawArena();
+    return;
+  }
+
+  if(clicked && clicked.side !== arena.phase){
+    const attacked = attemptAttack(selected, clicked);
+    if(attacked){
+      arena.selectedId = null;
+      if(!checkArenaEnd()) checkAutoEndPhase();
+    } else {
+      arenaLog(`${unitLabel(selected)} no puede disparar (fuera de rango o línea de tiro bloqueada).`);
+      drawArena();
+    }
+    return;
+  }
+
+  if(!clicked){
+    const moved = attemptMove(selected, col, row);
+    if(moved){
+      arena.selectedId = null;
+      checkAutoEndPhase();
+    } else {
+      arenaLog('Movimiento inválido (fuera de rango u ocupado).');
+      drawArena();
+    }
+    return;
+  }
+
+  if(clicked.side === arena.phase && !clicked.acted){
+    arena.selectedId = clicked.id;
+    drawArena();
+  }
+});
+
+// Termina la fase sola en cuanto todas las unidades vivas del bando activo ya actuaron.
+function checkAutoEndPhase(){
+  if(!arena) return;
+  const allActed = activeSquad().every(u => !u.alive || u.acted);
+  if(allActed){
+    endArenaPhase();
+  } else {
+    drawArena();
+  }
+}
+
+function drawDiamond(cx, cy, fill, stroke){
+  arenaCtx.beginPath();
+  arenaCtx.moveTo(cx, cy - T_H/2);
+  arenaCtx.lineTo(cx + T_W/2, cy);
+  arenaCtx.lineTo(cx, cy + T_H/2);
+  arenaCtx.lineTo(cx - T_W/2, cy);
+  arenaCtx.closePath();
+  if(fill){ arenaCtx.fillStyle = fill; arenaCtx.fill(); }
+  if(stroke){ arenaCtx.strokeStyle = stroke; arenaCtx.lineWidth = 1; arenaCtx.stroke(); }
+}
+
+function drawArenaUnit(unit){
+  const { x, y } = tileToScreen(unit.col, unit.row);
+  const color = unit.side === 'attacker' ? getCss('--p1') : getCss('--p2');
+  const dark = unit.side === 'attacker' ? getCss('--p1-dark') : getCss('--p2-dark');
+
+  const isSelected = arena.selectedId === unit.id;
+  arenaCtx.fillStyle = dark;
+  arenaCtx.beginPath();
+  arenaCtx.arc(x, y - 6, 13, 0, Math.PI*2);
+  arenaCtx.fill();
+  arenaCtx.strokeStyle = isSelected ? '#e0d070' : color;
+  arenaCtx.lineWidth = isSelected ? 3 : 2;
+  arenaCtx.stroke();
+
+  drawIconOn(arenaCtx, unit.type.id, x, y - 6, 9, getCss('--text'));
+
+  // barra de vida
+  const barW = 26;
+  arenaCtx.fillStyle = '#000';
+  arenaCtx.fillRect(x - barW/2, y - 24, barW, 4);
+  arenaCtx.fillStyle = unit.acted ? getCss('--text-dim') : '#8fbf6f';
+  arenaCtx.fillRect(x - barW/2, y - 24, barW * Math.max(0, unit.hp/unit.maxHp), 4);
+}
+
+function drawIconOn(targetCtx, typeId, cx, cy, size, color){
+  targetCtx.save();
+  targetCtx.translate(cx, cy);
+  (ICONS[typeId] || ICONS.infantry)(targetCtx, size, color);
+  targetCtx.restore();
+}
+
+function drawArena(){
+  arenaCtx.clearRect(0, 0, arenaCanvas.width, arenaCanvas.height);
+
+  // orden de dibujo trasera->delantera para que el solape isométrico se vea bien
+  const tiles = [];
+  for(let r = 0; r < A_ROWS; r++){
+    for(let c = 0; c < A_COLS; c++){
+      tiles.push({ c, r });
+    }
+  }
+  tiles.sort((a,b) => (a.c+a.r) - (b.c+b.r));
+
+  for(const t of tiles){
+    const { x, y } = tileToScreen(t.c, t.r);
+    const isCover = arena.cover.has(key(t.c, t.r));
+    drawDiamond(x, y, isCover ? '#3a3324' : getCss('--grid-fill'), getCss('--grid-line'));
+    if(isCover){
+      arenaCtx.fillStyle = '#8a7a3a';
+      arenaCtx.fillRect(x - 10, y - 18, 20, 14);
+    }
+  }
+
+  for(const unit of [...arena.attackerSquad, ...arena.defenderSquad]){
+    if(unit.alive) drawArenaUnit(unit);
+  }
+}
+
+const AI_PLAYER = 2; // el Enemigo lo controla la máquina
+
+function collectValidMoves(player){
+  const moves = [];
+  for(let fr = 0; fr < ROWS; fr++){
+    for(let fc = 0; fc < COLS; fc++){
+      const piece = board[fr][fc];
+      if(!piece || piece.owner !== player || !isMovable(piece.type)) continue;
+      for(let tr = 0; tr < ROWS; tr++){
+        for(let tc = 0; tc < COLS; tc++){
+          if(fr === tr && fc === tc) continue;
+          if(isValidMove({ r: fr, c: fc }, { r: tr, c: tc })){
+            moves.push({ from: { r: fr, c: fc }, to: { r: tr, c: tc } });
+          }
+        }
+      }
+    }
+  }
+  return moves;
+}
+
+function aiTakeTurn(){
+  const moves = collectValidMoves(AI_PLAYER);
+  if(moves.length === 0){
+    // Sin movimientos posibles: se pasa el turno.
+    currentPlayer = 1;
+    updateStatus();
+    draw();
+    return;
+  }
+  const choice = moves[Math.floor(Math.random() * moves.length)];
+  movePiece(choice.from, choice.to);
+}
+
+// Se llama después de cada cambio de turno para que la IA juegue sola
+// cuando le toca, salvo que haya quedado una arena abierta (esa se
+// sigue jugando en el mismo dispositivo, en modo local, por ahora).
+function maybeTriggerAI(){
+  if(currentPlayer === AI_PLAYER && !arena){
+    statusEl.textContent = 'Turno: Enemigo (rojo) — pensando...';
+    setTimeout(aiTakeTurn, 500);
+  }
+}
+
+function movePiece(from, to){
+  const attacker = board[from.r][from.c];
+  const defender = board[to.r][to.c];
+
+  if(!defender){
+    board[to.r][to.c] = attacker;
+    board[from.r][from.c] = null;
+    logMessage(`${ownerLabel(attacker.owner)}: ${attacker.type.label} avanza.`);
+    currentPlayer = currentPlayer === 1 ? 2 : 1;
+    updateStatus();
+    draw();
+    maybeTriggerAI();
+    return;
+  }
+
+  // Bandera y Mina se resuelven directo, sin arena.
+  const instant = resolveCombat(attacker, defender);
+  if(instant){
+    const attackerName = `${ownerLabel(attacker.owner)} ${attacker.type.label}`;
+    const defenderName = `${ownerLabel(defender.owner)} ${defender.type.label}`;
+
+    if(defender.type.id === 'mine'){
+      if(instant.attackerWins){
+        board[to.r][to.c] = attacker; board[from.r][from.c] = null;
+        logMessage(`${attackerName} vence a ${defenderName}. ${instant.note}`, 'win');
+      } else {
+        board[to.r][to.c] = null; board[from.r][from.c] = null;
+        logMessage(`${defenderName} destruye a ${attackerName} y detona con él. ${instant.note}`, 'lose');
+      }
+    } else { // bandera
+      board[to.r][to.c] = attacker; board[from.r][from.c] = null;
+      logMessage(`${attackerName} captura la bandera de ${defenderName}. ${instant.note}`, 'win');
+    }
+
+    currentPlayer = currentPlayer === 1 ? 2 : 1;
+    updateStatus();
+    draw();
+    maybeTriggerAI();
+    return;
+  }
+
+  // Cualquier otro contacto pasa a la arena interactiva.
+  startArena(from, to, attacker, defender);
+}
+
+function ownerLabel(owner){
+  return owner === 1 ? 'Jugador' : 'Enemigo';
+}
+
+function handleCellClick(r, c){
+  if(currentPlayer === AI_PLAYER) return; // no es el turno del humano
+  const clicked = board[r][c];
+
+  if(!selected){
+    if(clicked && clicked.owner === currentPlayer && isMovable(clicked.type)){
+      selected = { r, c };
+      draw();
+    }
+    return;
+  }
+
+  if(selected.r === r && selected.c === c){
+    selected = null;
+    draw();
+    return;
+  }
+
+  if(isValidMove(selected, { r, c })){
+    movePiece(selected, { r, c });
+    selected = null;
+  } else if(clicked && clicked.owner === currentPlayer && isMovable(clicked.type)){
+    selected = { r, c }; // cambia la selección a otra ficha propia
+    draw();
+  } else {
+    selected = null;
+    draw();
+  }
+}
+
+canvas.addEventListener('click', (evt) => {
+  const rect = canvas.getBoundingClientRect();
+  const x = (evt.clientX - rect.left) * (canvas.width / rect.width);
+  const y = (evt.clientY - rect.top) * (canvas.height / rect.height);
+  const c = Math.floor(x / CELL);
+  const r = Math.floor(y / CELL);
+  if(r < 0 || r >= ROWS || c < 0 || c >= COLS) return;
+  handleCellClick(r, c);
+});
+
+function deployBoard(){
+  board = Array.from({length: ROWS}, () => Array(COLS).fill(null));
+
+  const p1Cells = deployZoneCells(7, 9).slice(0, 30);
+  const p2Cells = deployZoneCells(0, 2).slice(0, 30);
+
+  const p1Roster = shuffle(buildRoster());
+  const p2Roster = shuffle(buildRoster());
+
+  p1Cells.forEach((cell, i) => {
+    board[cell.r][cell.c] = { owner: 1, type: p1Roster[i] };
+  });
+  p2Cells.forEach((cell, i) => {
+    board[cell.r][cell.c] = { owner: 2, type: p2Roster[i] };
+  });
+}
+
+function drawGrid(){
+  ctx.strokeStyle = getCss('--grid-line');
+  ctx.lineWidth = 1;
+  for(let c = 0; c <= COLS; c++){
+    ctx.beginPath(); ctx.moveTo(c * CELL, 0); ctx.lineTo(c * CELL, ROWS * CELL); ctx.stroke();
+  }
+  for(let r = 0; r <= ROWS; r++){
+    ctx.beginPath(); ctx.moveTo(0, r * CELL); ctx.lineTo(COLS * CELL, r * CELL); ctx.stroke();
+  }
+}
+
+function drawNeutralZone(){
+  ctx.fillStyle = 'rgba(255,255,255,0.03)';
+  ctx.fillRect(0, 3 * CELL, COLS * CELL, 4 * CELL);
+}
+
+// --- Símbolos por tipo de unidad ---
+// Cada función dibuja centrada en (0,0), asumiendo que el caller ya hizo
+// ctx.translate(cx, cy). "s" es la mitad del tamaño disponible (radio aprox).
+const ICONS = {
+  unknown(ctx, s, color){
+    // Silueta genérica para una ficha enemiga aún no revelada.
+    ctx.fillStyle = color;
+    ctx.beginPath(); ctx.arc(0, 0, s*0.55, 0, Math.PI*2); ctx.fill();
+  },
+  flag(ctx, s, color){
+    ctx.strokeStyle = color; ctx.lineWidth = Math.max(1.5, s*0.12);
+    ctx.beginPath(); ctx.moveTo(-s*0.5, s*0.8); ctx.lineTo(-s*0.5, -s*0.8); ctx.stroke();
+    ctx.fillStyle = color;
+    ctx.beginPath();
+    ctx.moveTo(-s*0.5, -s*0.8);
+    ctx.lineTo(s*0.7, -s*0.4);
+    ctx.lineTo(-s*0.5, 0);
+    ctx.closePath(); ctx.fill();
+  },
+  commander(ctx, s, color){
+    ctx.fillStyle = color;
+    const spikes = 5, outerR = s*0.85, innerR = s*0.38;
+    ctx.beginPath();
+    for(let i = 0; i < spikes*2; i++){
+      const r = i % 2 === 0 ? outerR : innerR;
+      const a = (Math.PI / spikes) * i - Math.PI/2;
+      const px = Math.cos(a)*r, py = Math.sin(a)*r;
+      i === 0 ? ctx.moveTo(px, py) : ctx.lineTo(px, py);
+    }
+    ctx.closePath(); ctx.fill();
+  },
+  tank(ctx, s, color){
+    ctx.fillStyle = color; ctx.strokeStyle = color;
+    ctx.lineWidth = Math.max(1.5, s*0.14);
+    // cuerpo
+    ctx.fillRect(-s*0.8, -s*0.35, s*1.6, s*0.75);
+    // torreta
+    ctx.beginPath(); ctx.arc(0, -s*0.35, s*0.35, Math.PI, 0); ctx.fill();
+    // cañón
+    ctx.beginPath(); ctx.moveTo(0, -s*0.55); ctx.lineTo(s*0.85, -s*0.55); ctx.stroke();
+  },
+  sapper(ctx, s, color){
+    ctx.strokeStyle = color; ctx.lineWidth = Math.max(1.5, s*0.16);
+    // rombo
+    ctx.beginPath();
+    ctx.moveTo(0, -s*0.85); ctx.lineTo(s*0.85, 0); ctx.lineTo(0, s*0.85); ctx.lineTo(-s*0.85, 0);
+    ctx.closePath(); ctx.stroke();
+    // X interior
+    ctx.beginPath();
+    ctx.moveTo(-s*0.35, -s*0.35); ctx.lineTo(s*0.35, s*0.35);
+    ctx.moveTo(s*0.35, -s*0.35); ctx.lineTo(-s*0.35, s*0.35);
+    ctx.stroke();
+  },
+  infantry(ctx, s, color){
+    ctx.strokeStyle = color; ctx.lineWidth = Math.max(1.5, s*0.18);
+    ctx.lineCap = 'round';
+    // dos galones (chevrones) apilados
+    for(const dy of [-s*0.15, s*0.45]){
+      ctx.beginPath();
+      ctx.moveTo(-s*0.7, dy); ctx.lineTo(0, dy - s*0.5); ctx.lineTo(s*0.7, dy);
+      ctx.stroke();
+    }
+  },
+  scout(ctx, s, color){
+    ctx.strokeStyle = color; ctx.fillStyle = color;
+    ctx.lineWidth = Math.max(1.5, s*0.14);
+    // ojo (almendra)
+    ctx.beginPath();
+    ctx.moveTo(-s*0.85, 0);
+    ctx.quadraticCurveTo(0, -s*0.65, s*0.85, 0);
+    ctx.quadraticCurveTo(0, s*0.65, -s*0.85, 0);
+    ctx.stroke();
+    ctx.beginPath(); ctx.arc(0, 0, s*0.22, 0, Math.PI*2); ctx.fill();
+  },
+  mine(ctx, s, color){
+    ctx.strokeStyle = color; ctx.fillStyle = color;
+    ctx.lineWidth = Math.max(1.5, s*0.14);
+    ctx.beginPath(); ctx.arc(0, 0, s*0.45, 0, Math.PI*2); ctx.fill();
+    for(let i = 0; i < 8; i++){
+      const a = (Math.PI/4) * i;
+      const x1 = Math.cos(a)*s*0.5, y1 = Math.sin(a)*s*0.5;
+      const x2 = Math.cos(a)*s*0.9, y2 = Math.sin(a)*s*0.9;
+      ctx.beginPath(); ctx.moveTo(x1,y1); ctx.lineTo(x2,y2); ctx.stroke();
+    }
+  },
+  spy(ctx, s, color){
+    ctx.strokeStyle = color; ctx.fillStyle = color;
+    ctx.lineWidth = Math.max(1.5, s*0.14);
+    // antifaz
+    ctx.beginPath();
+    ctx.ellipse(-s*0.42, -s*0.05, s*0.4, s*0.28, 0, 0, Math.PI*2);
+    ctx.ellipse(s*0.42, -s*0.05, s*0.4, s*0.28, 0, 0, Math.PI*2);
+    ctx.fill();
+    ctx.beginPath();
+    ctx.moveTo(-s*0.05, -s*0.05); ctx.lineTo(s*0.05, -s*0.05); ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(-s*0.82, -s*0.05); ctx.lineTo(-s, -s*0.3);
+    ctx.moveTo(s*0.82, -s*0.05); ctx.lineTo(s, -s*0.3);
+    ctx.stroke();
+  },
+};
+
+function drawIcon(typeId, cx, cy, size, color){
+  ctx.save();
+  ctx.translate(cx, cy);
+  (ICONS[typeId] || ICONS.infantry)(ctx, size, color);
+  ctx.restore();
+}
+
+const HUMAN_PLAYER = 1; // desde cuya perspectiva se aplica la niebla
+const SPY_REVEAL_RADIUS = 2;
+let revealedEnemyCells = new Set();
+
+// Un Espía propio revela la identidad real de toda ficha enemiga
+// dentro de un radio de 2 casillas a su alrededor.
+function computeRevealedEnemyCells(){
+  const revealed = new Set();
+  for(let r = 0; r < ROWS; r++){
+    for(let c = 0; c < COLS; c++){
+      const p = board[r][c];
+      if(!p || p.owner !== HUMAN_PLAYER || p.type.id !== 'spy') continue;
+      for(let dr = -SPY_REVEAL_RADIUS; dr <= SPY_REVEAL_RADIUS; dr++){
+        for(let dc = -SPY_REVEAL_RADIUS; dc <= SPY_REVEAL_RADIUS; dc++){
+          if(Math.max(Math.abs(dr), Math.abs(dc)) > SPY_REVEAL_RADIUS) continue;
+          const rr = r + dr, cc = c + dc;
+          if(rr < 0 || rr >= ROWS || cc < 0 || cc >= COLS) continue;
+          revealed.add(rr + ',' + cc);
+        }
+      }
+    }
+  }
+  return revealed;
+}
+
+function drawPiece(r, c, piece){
+  const x = c * CELL, y = r * CELL;
+  const pad = 6;
+
+  ctx.fillStyle = piece.owner === 1 ? getCss('--p1-dark') : getCss('--p2-dark');
+  ctx.fillRect(x + pad, y + pad, CELL - pad*2, CELL - pad*2);
+
+  ctx.strokeStyle = piece.owner === 1 ? getCss('--p1') : getCss('--p2');
+  ctx.lineWidth = 2;
+  ctx.strokeRect(x + pad, y + pad, CELL - pad*2, CELL - pad*2);
+
+  // Niebla de guerra: una ficha enemiga se dibuja genérica salvo que
+  // esté dentro del radio de un Espía propio.
+  const isHiddenEnemy = piece.owner !== HUMAN_PLAYER && !revealedEnemyCells.has(r + ',' + c);
+  const iconId = isHiddenEnemy ? 'unknown' : piece.type.id;
+
+  drawIcon(iconId, x + CELL/2, y + CELL/2, CELL*0.28, getCss('--text'));
+}
+
+function drawSelection(){
+  if(!selected) return;
+  const x = selected.c * CELL, y = selected.r * CELL;
+  ctx.strokeStyle = '#e0d070';
+  ctx.lineWidth = 3;
+  ctx.strokeRect(x + 2, y + 2, CELL - 4, CELL - 4);
+}
+
+function draw(){
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  ctx.fillStyle = getCss('--grid-fill');
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+  revealedEnemyCells = computeRevealedEnemyCells();
+
+  drawNeutralZone();
+
+  for(let r = 0; r < ROWS; r++){
+    for(let c = 0; c < COLS; c++){
+      const piece = board[r][c];
+      if(piece) drawPiece(r, c, piece);
+    }
+  }
+
+  drawGrid();
+  drawSelection();
+}
+
+function renderLegend(){
+  let html = '<h2>UNIDADES (x30 por bando)</h2>';
+  for(const t of UNIT_TYPES){
+    html += `
+      <div class="row">
+        <canvas class="icon-canvas" data-type="${t.id}" width="20" height="20"></canvas>
+        <div>${t.label} ×${t.count} — ATK ${t.atk} / DEF ${t.def}</div>
+      </div>`;
+  }
+  html += `
+    <div class="row" style="margin-top:8px;">
+      <div class="swatch" style="background:var(--p1-dark); border:1px solid var(--p1);"></div>
+      <div>Jugador (filas 7–9)</div>
+    </div>
+    <div class="row">
+      <div class="swatch" style="background:var(--p2-dark); border:1px solid var(--p2);"></div>
+      <div>Enemigo (filas 0–2)</div>
+    </div>`;
+  legendEl.innerHTML = html;
+
+  legendEl.querySelectorAll('.icon-canvas').forEach(cnv => {
+    const iconCtx = cnv.getContext('2d');
+    const typeId = cnv.dataset.type;
+    iconCtx.save();
+    iconCtx.translate(10, 10);
+    (ICONS[typeId] || ICONS.infantry)(iconCtx, 8, getCss('--text'));
+    iconCtx.restore();
+  });
+}
+
+document.getElementById('reshuffle').addEventListener('click', () => {
+  deployBoard();
+  currentPlayer = 1;
+  selected = null;
+  logEl.innerHTML = '';
+  draw();
+  updateStatus();
+});
+
+deployBoard();
+draw();
+renderLegend();
+updateStatus();
+</script>
+</body>
+</html>
